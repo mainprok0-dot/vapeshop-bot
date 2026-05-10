@@ -1,3 +1,23 @@
+import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+# Фиктивный веб-сервер чтобы Railway не отключал бота
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'Bot is running!')
+    def log_message(self, format, *args):
+        pass  # отключаем лишние логи
+
+def run_server():
+    port = int(os.environ.get('PORT', 8080))
+    server = HTTPServer(('0.0.0.0', port), Handler)
+    server.serve_forever()
+
+# Запускаем сервер в отдельном потоке
+threading.Thread(target=run_server, daemon=True).start()
 #!/usr/bin/env python3
 """
 VapeShop Telegram Bot — обработчик заказов
