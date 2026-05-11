@@ -21,7 +21,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 # ============================================================
 # НАСТРОЙКИ
 # ============================================================
-BOT_TOKEN    = os.environ.get("BOT_TOKEN", "8580758584:AAFLoIN4PVFnQoC_RssMvLaWRhRtQjbep1k")
+BOT_TOKEN    = os.environ.get("BOT_TOKEN", "8515662983:AAEPFdxzN6czYZ6B72XOBeuOMfna6fgtkOE")
 ADMIN_ID     = int(os.environ.get("ADMIN_CHAT_ID", "8237417166"))
 WEBAPP_URL   = os.environ.get("WEBAPP_URL", "https://musical-lamington-314527.netlify.app")
 PORT         = int(os.environ.get("PORT", 8080))
