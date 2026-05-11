@@ -12,7 +12,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 # ========== НАСТРОЙКИ ==========
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8580758584:AAFLoIN4PVFnQoC_RssMvLaWRhRtQjbep1k")
-ADMIN_ID = int(os.environ.get("ADMIN_CHAT_ID", "8237417166"))
+ADMIN_ID = int(os.environ.get("ADMIN_CHAT_ID", "8018415461"))
 PORT = int(os.environ.get("PORT", 8080))
 DATA_FILE = "data.json"
 # ================================
