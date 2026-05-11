@@ -4,563 +4,235 @@ import json
 import logging
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse
 import threading
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # ========== НАСТРОЙКИ ==========
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8580758584:AAFLoIN4PVFnQoC_RssMvLaWRhRtQjbep1k")
-ADMIN_ID = int(os.environ.get("ADMIN_CHAT_ID", "8018415461"))
+BOT_TOKEN = "8580758584:AAFLoIN4PVFnQoC_RssMvLaWRhRtQjbep1k"
+ADMIN_ID = 8237417166  # ВАШ Telegram ID (число!)
 PORT = int(os.environ.get("PORT", 8080))
-DATA_FILE = "data.json"
+DATA_FILE = "products.json"
 # ================================
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
-# ========== ДАННЫЕ ПО УМОЛЧАНИЮ ==========
-DEFAULT_DATA = {
-    "products": [
-        {"id": 1, "emoji": "💨", "name": "VUSE Alto Pro", "desc": "Устройство с регулировкой мощности",
-         "category": "device", "price": 2990, "badge": "хит", "inStock": True},
-        {"id": 2, "emoji": "🔥", "name": "SMOK Nord 5", "desc": "Мощный под-мод 80W", "category": "device",
-         "price": 3490, "badge": "новинка", "inStock": True},
-        {"id": 3, "emoji": "🌊", "name": "BLVK Salt Mango", "desc": "Солевая жидкость 30мл 20мг", "category": "liquid",
-         "price": 850, "badge": "", "inStock": True},
-        {"id": 4, "emoji": "❄️", "name": "ICE Salt Mint", "desc": "Ледяная мята 30мл 50мг", "category": "liquid",
-         "price": 790, "badge": "sale", "inStock": True},
-        {"id": 5, "emoji": "🍓", "name": "ELFBAR 600 Strawberry", "desc": "Одноразовый под 600 затяжек",
-         "category": "pod", "price": 650, "badge": "", "inStock": True},
-        {"id": 6, "emoji": "🍋", "name": "GEEK BAR Lemon", "desc": "Одноразовый под 575 затяжек", "category": "pod",
-         "price": 620, "badge": "", "inStock": True},
-        {"id": 7, "emoji": "🧊", "name": "Испаритель Mesh 0.2Ω", "desc": "Для SMOK Nord 5, 5шт", "category": "acc",
-         "price": 490, "badge": "", "inStock": True},
-        {"id": 8, "emoji": "⚡", "name": "Зарядка USB-C 65W", "desc": "Быстрая зарядка для устройств", "category": "acc",
-         "price": 390, "badge": "", "inStock": True},
-    ],
-    "categories": [
-        {"key": "all", "name": "Все", "emoji": "🎯"},
-        {"key": "device", "name": "Устройства", "emoji": "💨"},
-        {"key": "liquid", "name": "Жидкости", "emoji": "🌊"},
-        {"key": "pod", "name": "Поды", "emoji": "🍓"},
-        {"key": "acc", "name": "Аксессуары", "emoji": "⚡"},
-    ],
-    "order_counter": 0
-}
 
-
-def load_data():
+# ========== РАБОТА С ТОВАРАМИ ==========
+def load_products():
     if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
+        with open(DATA_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
-    return DEFAULT_DATA.copy()
+    # Товары по умолчанию
+    return [
+        {"id": 1, "emoji": "💨", "name": "VUSE Alto Pro", "desc": "Мощное устройство", "category": "device",
+         "price": 2990, "stock": True},
+        {"id": 2, "emoji": "🔥", "name": "SMOK Nord 5", "desc": "80W с pods", "category": "device", "price": 3490,
+         "stock": True},
+        {"id": 3, "emoji": "🌊", "name": "BLVK Mango", "desc": "Солевая жидкость", "category": "liquid", "price": 850,
+         "stock": True},
+        {"id": 4, "emoji": "❄️", "name": "Ice Mint", "desc": "Ледяная мята", "category": "liquid", "price": 790,
+         "stock": True},
+        {"id": 5, "emoji": "🍓", "name": "ELFBAR Strawberry", "desc": "600 затяжек", "category": "pod", "price": 650,
+         "stock": True},
+        {"id": 6, "emoji": "🍋", "name": "GEEK BAR Lemon", "desc": "575 затяжек", "category": "pod", "price": 620,
+         "stock": True},
+    ]
 
 
-def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def save_products(products):
+    with open(DATA_FILE, 'w', encoding='utf-8') as f:
+        json.dump(products, f, ensure_ascii=False, indent=2)
 
 
-# ========== HTML ШАБЛОН ==========
+# ========== HTML СТРАНИЦА ==========
 HTML = '''<!DOCTYPE html>
-<html lang="ru">
+<html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <title>GuberVape</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-            background: #0a0a0f;
-            color: #ffffff;
-            padding: 0;
-            margin: 0;
-            min-height: 100vh;
-        }
-
-        /* Header */
-        .header {
-            background: linear-gradient(135deg, #1a0a2e 0%, #0a0a0f 100%);
-            padding: 20px 16px;
-            text-align: center;
-            border-bottom: 1px solid #3a2a5a;
-            position: sticky;
-            top: 0;
-            z-index: 100;
-        }
-
-        .logo {
-            font-size: 28px;
-            font-weight: 800;
-            letter-spacing: 2px;
-            background: linear-gradient(135deg, #c084fc, #a855f7);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            text-shadow: 0 0 20px rgba(168,85,247,0.3);
-        }
-
-        .logo span {
-            font-size: 12px;
-            letter-spacing: 4px;
-            display: block;
-            color: #7e22ce;
-            -webkit-text-fill-color: #7e22ce;
-            margin-top: 4px;
-        }
-
-        /* Category Tabs */
-        .categories {
-            display: flex;
-            gap: 8px;
-            padding: 12px 16px;
-            overflow-x: auto;
-            background: #0f0f14;
-            border-bottom: 1px solid #2a2a3a;
-            scrollbar-width: none;
-        }
-
-        .categories::-webkit-scrollbar {
-            display: none;
-        }
-
-        .cat-btn {
-            padding: 8px 18px;
-            border-radius: 30px;
-            background: #1a1a2a;
-            border: 1px solid #2a2a3a;
-            color: #a1a1aa;
-            font-size: 14px;
-            font-weight: 500;
-            white-space: nowrap;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-
-        .cat-btn.active {
-            background: linear-gradient(135deg, #7e22ce, #a855f7);
-            border-color: #a855f7;
-            color: white;
-            box-shadow: 0 4px 15px rgba(168,85,247,0.3);
-        }
-
-        /* Cart Button */
-        .cart-icon {
-            position: fixed;
-            bottom: 20px;
-            right: 20px;
-            background: linear-gradient(135deg, #7e22ce, #a855f7);
-            width: 56px;
-            height: 56px;
-            border-radius: 28px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            box-shadow: 0 4px 20px rgba(168,85,247,0.4);
-            z-index: 200;
-            transition: transform 0.2s;
-        }
-
-        .cart-icon:active {
-            transform: scale(0.95);
-        }
-
-        .cart-icon span {
-            font-size: 28px;
-        }
-
-        .cart-badge {
-            position: absolute;
-            top: -5px;
-            right: -5px;
-            background: #ff4466;
-            color: white;
-            font-size: 11px;
-            font-weight: bold;
-            width: 20px;
-            height: 20px;
-            border-radius: 10px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-
-        /* Products Grid */
-        .products {
-            padding: 16px;
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 12px;
-        }
-
-        .product-card {
-            background: #12121a;
-            border: 1px solid #2a2a3a;
-            border-radius: 16px;
-            overflow: hidden;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-
-        .product-card:active {
-            transform: scale(0.98);
-        }
-
-        .product-img {
-            background: linear-gradient(135deg, #1a1a2a, #0f0f14);
-            padding: 24px;
-            text-align: center;
-            font-size: 56px;
-            position: relative;
-        }
-
-        .badge {
-            position: absolute;
-            top: 8px;
-            left: 8px;
-            background: #a855f7;
-            color: white;
-            font-size: 10px;
-            font-weight: bold;
-            padding: 3px 8px;
-            border-radius: 20px;
-            text-transform: uppercase;
-        }
-
-        .badge.sale {
-            background: #ff4466;
-        }
-
-        .badge.hit {
-            background: #f59e0b;
-        }
-
-        .product-info {
-            padding: 12px;
-        }
-
-        .product-name {
-            font-size: 15px;
-            font-weight: 700;
-            margin-bottom: 4px;
-        }
-
-        .product-desc {
-            font-size: 11px;
-            color: #6b6b8a;
-            margin-bottom: 8px;
-        }
-
-        .product-footer {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .product-price {
-            font-size: 18px;
-            font-weight: 700;
-            color: #c084fc;
-        }
-
-        .add-btn {
-            background: linear-gradient(135deg, #7e22ce, #a855f7);
-            border: none;
-            width: 32px;
-            height: 32px;
-            border-radius: 10px;
-            color: white;
-            font-size: 18px;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-
-        /* Cart Modal */
-        .modal {
-            display: none;
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: rgba(0,0,0,0.9);
-            z-index: 300;
-            padding: 20px;
-            overflow-y: auto;
-        }
-
-        .modal.active {
-            display: block;
-        }
-
-        .modal-content {
-            background: #12121a;
-            border-radius: 24px;
-            padding: 20px;
-            max-width: 500px;
-            margin: 0 auto;
-            min-height: 80vh;
-        }
-
-        .modal-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 20px;
-            padding-bottom: 15px;
-            border-bottom: 1px solid #2a2a3a;
-        }
-
-        .close-modal {
-            background: none;
-            border: none;
-            color: white;
-            font-size: 28px;
-            cursor: pointer;
-        }
-
-        .cart-item {
-            background: #1a1a2a;
-            border-radius: 12px;
-            padding: 12px;
-            margin-bottom: 10px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .qty-control {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-
-        .qty-btn {
-            width: 28px;
-            height: 28px;
-            border-radius: 8px;
-            background: #2a2a3a;
-            border: none;
-            color: white;
-            font-size: 16px;
-            cursor: pointer;
-        }
-
-        .cart-total {
-            margin-top: 20px;
-            padding-top: 15px;
-            border-top: 1px solid #2a2a3a;
-            font-size: 20px;
-            font-weight: bold;
-            text-align: right;
-            color: #c084fc;
-        }
-
-        .order-form {
-            margin-top: 20px;
-        }
-
-        .order-form input,
-        .order-form textarea {
-            width: 100%;
-            padding: 12px;
-            margin-bottom: 12px;
-            background: #1a1a2a;
-            border: 1px solid #2a2a3a;
-            border-radius: 12px;
-            color: white;
-            font-size: 14px;
-        }
-
-        .order-form input:focus,
-        .order-form textarea:focus {
-            outline: none;
-            border-color: #a855f7;
-        }
-
-        .submit-btn {
-            width: 100%;
-            padding: 14px;
-            background: linear-gradient(135deg, #7e22ce, #a855f7);
-            border: none;
-            border-radius: 12px;
-            color: white;
-            font-size: 16px;
-            font-weight: bold;
-            cursor: pointer;
-            margin-top: 10px;
-        }
-
-        .status {
-            position: fixed;
-            bottom: 90px;
-            left: 20px;
-            right: 20px;
-            background: #1a1a2a;
-            border: 1px solid #a855f7;
-            padding: 12px;
-            border-radius: 12px;
-            text-align: center;
-            z-index: 250;
-            display: none;
-        }
-
-        .brand-header {
-            background: linear-gradient(135deg, #1a0a2e, #0a0a0f);
-            padding: 16px;
-            text-align: center;
-        }
-
-        .brand-name {
-            font-size: 20px;
-            font-weight: bold;
-            color: #c084fc;
-        }
-
-        .brand-tags {
-            display: flex;
-            justify-content: center;
-            gap: 20px;
-            margin-top: 8px;
-            font-size: 11px;
-            color: #6b6b8a;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: system-ui; background: #0a0a0f; color: white; padding-bottom: 80px; }
+        .header { background: linear-gradient(135deg, #1a0a2e, #0a0a0f); padding: 20px; text-align: center; }
+        .logo { font-size: 28px; font-weight: bold; background: linear-gradient(135deg, #c084fc, #a855f7); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .categories { display: flex; gap: 8px; padding: 12px; overflow-x: auto; background: #0f0f14; }
+        .cat-btn { padding: 8px 16px; border-radius: 20px; background: #1a1a2a; cursor: pointer; font-size: 14px; white-space: nowrap; }
+        .cat-btn.active { background: #a855f7; color: white; }
+        .products { padding: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        .product { background: #12121a; border-radius: 16px; padding: 12px; border: 1px solid #2a2a3a; }
+        .product-img { font-size: 48px; text-align: center; padding: 12px; }
+        .product-name { font-weight: bold; margin: 8px 0 4px; }
+        .product-price { color: #c084fc; font-weight: bold; font-size: 18px; }
+        .add-btn { background: #a855f7; border: none; padding: 8px 16px; border-radius: 10px; color: white; cursor: pointer; margin-top: 8px; width: 100%; }
+        .cart-btn { position: fixed; bottom: 20px; right: 20px; background: #a855f7; width: 56px; height: 56px; border-radius: 28px; display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 4px 12px rgba(168,85,247,0.4); }
+        .cart-count { position: absolute; top: -5px; right: -5px; background: #ff4466; border-radius: 50%; width: 20px; height: 20px; font-size: 11px; display: flex; align-items: center; justify-content: center; }
+        .admin-btn { position: fixed; bottom: 20px; left: 20px; background: #2a2a3a; width: 44px; height: 44px; border-radius: 22px; display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 20px; }
+        .modal { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.95); z-index: 200; padding: 20px; overflow-y: auto; }
+        .modal.active { display: block; }
+        .modal-content { background: #12121a; border-radius: 24px; padding: 20px; max-width: 500px; margin: 0 auto; }
+        .modal-header { display: flex; justify-content: space-between; margin-bottom: 20px; }
+        .close { background: none; border: none; color: white; font-size: 24px; cursor: pointer; }
+        input, textarea, select { width: 100%; padding: 12px; margin: 8px 0; background: #1a1a2a; border: 1px solid #2a2a3a; border-radius: 10px; color: white; }
+        button { cursor: pointer; }
+        .status { position: fixed; bottom: 100px; left: 20px; right: 20px; background: #1a1a2a; padding: 12px; border-radius: 12px; text-align: center; display: none; z-index: 150; }
+        .admin-product { background: #1a1a2a; padding: 12px; margin: 8px 0; border-radius: 12px; display: flex; justify-content: space-between; align-items: center; }
     </style>
 </head>
 <body>
     <div class="header">
-        <div class="logo">GUBERVAPE<span>ВЕЙП ШОП</span></div>
-    </div>
-
-    <div class="brand-header">
-        <div class="brand-name">GUBERVAPE</div>
-        <div class="brand-tags">LIQUID · DEVICE · PODS · PARTS</div>
+        <div class="logo">GUBERVAPE</div>
+        <div style="font-size: 12px; color: #888; margin-top: 5px;">ВЕЙП ШОП</div>
     </div>
 
     <div class="categories" id="categories"></div>
-
     <div class="products" id="products"></div>
 
-    <div class="cart-icon" onclick="openCart()">
-        <span>🛒</span>
-        <div class="cart-badge" id="cartBadge" style="display:none">0</div>
+    <div class="cart-btn" onclick="openCart()">
+        🛒
+        <div class="cart-count" id="cartCount" style="display:none">0</div>
     </div>
 
+    <div class="admin-btn" onclick="openAdmin()" id="adminBtn" style="display:none">⚙️</div>
+
+    <div class="status" id="status"></div>
+
+    <!-- Корзина -->
     <div class="modal" id="cartModal">
         <div class="modal-content">
             <div class="modal-header">
                 <h2>🛒 Корзина</h2>
-                <button class="close-modal" onclick="closeCart()">✕</button>
+                <button class="close" onclick="closeModal('cartModal')">✕</button>
             </div>
             <div id="cartItems"></div>
-            <div id="orderForm" class="order-form" style="display:none">
-                <input type="text" id="name" placeholder="Ваше ФИО *">
-                <input type="text" id="username" placeholder="@username Telegram *">
-                <textarea id="comment" placeholder="Комментарий к заказу (адрес, способ доставки и т.д.)" rows="3"></textarea>
-                <button class="submit-btn" onclick="submitOrder()">✅ ОФОРМИТЬ ЗАКАЗ</button>
-            </div>
+            <input type="text" id="userName" placeholder="Ваше ФИО *">
+            <input type="text" id="userUsername" placeholder="@username Telegram *">
+            <textarea id="userComment" placeholder="Комментарий (адрес, доставка)" rows="2"></textarea>
+            <button class="add-btn" onclick="submitOrder()" style="margin-top: 15px;">✅ ОФОРМИТЬ ЗАКАЗ</button>
         </div>
     </div>
 
-    <div class="status" id="status"></div>
+    <!-- Админ панель -->
+    <div class="modal" id="adminModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>⚙️ Управление товарами</h2>
+                <button class="close" onclick="closeModal('adminModal')">✕</button>
+            </div>
+            <button class="add-btn" onclick="showAddProduct()" style="margin-bottom: 15px;">+ Добавить товар</button>
+            <div id="adminProducts"></div>
+        </div>
+    </div>
+
+    <!-- Добавление/редактирование товара -->
+    <div class="modal" id="productModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="productModalTitle">Добавить товар</h2>
+                <button class="close" onclick="closeModal('productModal')">✕</button>
+            </div>
+            <input type="text" id="productEmoji" placeholder="Эмодзи (например 💨)" value="💨">
+            <input type="text" id="productName" placeholder="Название *">
+            <input type="text" id="productDesc" placeholder="Описание">
+            <select id="productCategory">
+                <option value="device">Устройства</option>
+                <option value="liquid">Жидкости</option>
+                <option value="pod">Поды</option>
+                <option value="acc">Аксессуары</option>
+            </select>
+            <input type="number" id="productPrice" placeholder="Цена *">
+            <label style="display: flex; align-items: center; gap: 10px; margin: 10px 0;">
+                <input type="checkbox" id="productStock" checked> В наличии
+            </label>
+            <button class="add-btn" onclick="saveProduct()">💾 СОХРАНИТЬ</button>
+        </div>
+    </div>
 
     <script>
         let products = [];
-        let categories = [];
         let cart = {};
         let currentCategory = 'all';
+        let editingProductId = null;
+        let isAdmin = false;
         let tg = window.Telegram?.WebApp;
 
         if (tg) {
             tg.expand();
             tg.ready();
+            // Проверяем, админ ли пользователь (через секретный клик)
+            tg.onEvent('viewportChanged', () => {});
         }
 
         function showStatus(msg, isError = false) {
             const el = document.getElementById('status');
             el.textContent = msg;
             el.style.background = isError ? '#ff446620' : '#00e67620';
-            el.style.borderColor = isError ? '#ff4466' : '#00e676';
+            el.style.border = isError ? '1px solid #ff4466' : '1px solid #00e676';
             el.style.display = 'block';
             setTimeout(() => {
                 el.style.display = 'none';
             }, 3000);
         }
 
-        async function loadData() {
+        async function loadProducts() {
             try {
-                const res = await fetch('/api/data');
-                const data = await res.json();
-                products = data.products;
-                categories = data.categories;
+                const res = await fetch('/api/products');
+                products = await res.json();
                 renderCategories();
                 renderProducts();
                 loadCart();
             } catch(e) {
                 console.error(e);
-                showStatus('Ошибка загрузки товаров', true);
+                showStatus('Ошибка загрузки', true);
             }
         }
 
         function renderCategories() {
-            const container = document.getElementById('categories');
-            container.innerHTML = categories.map(cat => `
-                <div class="cat-btn ${cat.key === currentCategory ? 'active' : ''}" onclick="filterProducts('${cat.key}')">
-                    ${cat.emoji} ${cat.name}
+            const cats = [
+                {key: 'all', name: 'Все', emoji: '🎯'},
+                {key: 'device', name: 'Устройства', emoji: '💨'},
+                {key: 'liquid', name: 'Жидкости', emoji: '🌊'},
+                {key: 'pod', name: 'Поды', emoji: '🍓'},
+                {key: 'acc', name: 'Аксессуары', emoji: '⚡'}
+            ];
+            const html = cats.map(c => `
+                <div class="cat-btn ${c.key === currentCategory ? 'active' : ''}" onclick="filterProducts('${c.key}')">
+                    ${c.emoji} ${c.name}
                 </div>
             `).join('');
+            document.getElementById('categories').innerHTML = html;
         }
 
-        function filterProducts(category) {
-            currentCategory = category;
+        function filterProducts(cat) {
+            currentCategory = cat;
             renderCategories();
             renderProducts();
         }
 
         function renderProducts() {
-            const container = document.getElementById('products');
             const filtered = currentCategory === 'all' 
                 ? products 
                 : products.filter(p => p.category === currentCategory);
 
             if (filtered.length === 0) {
-                container.innerHTML = '<div style="text-align:center; padding:40px; color:#6b6b8a">Товаров не найдено</div>';
+                document.getElementById('products').innerHTML = '<div style="text-align:center; padding:40px; color:#888;">Товаров нет</div>';
                 return;
             }
 
-            container.innerHTML = filtered.map(p => `
-                <div class="product-card" onclick="openProduct(${p.id})">
-                    <div class="product-img">
-                        <span>${p.emoji}</span>
-                        ${p.badge ? `<div class="badge ${p.badge === 'sale' ? 'sale' : p.badge === 'hit' ? 'hit' : ''}">${p.badge}</div>` : ''}
-                    </div>
-                    <div class="product-info">
-                        <div class="product-name">${p.name}</div>
-                        <div class="product-desc">${p.desc}</div>
-                        <div class="product-footer">
-                            <div class="product-price">${p.price.toLocaleString()}₽</div>
-                            <button class="add-btn" onclick="event.stopPropagation(); addToCart(${p.id})">+</button>
-                        </div>
-                    </div>
+            const html = filtered.map(p => `
+                <div class="product">
+                    <div class="product-img">${p.emoji}</div>
+                    <div class="product-name">${p.name}</div>
+                    <div class="product-desc" style="font-size:12px; color:#888;">${p.desc || ''}</div>
+                    <div class="product-price">${p.price.toLocaleString()}₽</div>
+                    <button class="add-btn" onclick="addToCart(${p.id})">+ В корзину</button>
                 </div>
             `).join('');
-        }
-
-        function openProduct(id) {
-            const p = products.find(p => p.id === id);
-            if (!p) return;
-            showStatus(`${p.name} — ${p.price.toLocaleString()}₽`, false);
+            document.getElementById('products').innerHTML = html;
         }
 
         function addToCart(id) {
@@ -571,13 +243,14 @@ HTML = '''<!DOCTYPE html>
             if (tg) tg.HapticFeedback?.impactOccurred('light');
         }
 
-        function removeFromCart(id) {
-            if (cart[id]) {
-                cart[id]--;
-                if (cart[id] === 0) delete cart[id];
-                saveCart();
-                updateCartBadge();
-                renderCartItems();
+        function updateCartBadge() {
+            const total = Object.values(cart).reduce((a,b) => a+b, 0);
+            const badge = document.getElementById('cartCount');
+            if (total > 0) {
+                badge.textContent = total;
+                badge.style.display = 'flex';
+            } else {
+                badge.style.display = 'none';
             }
         }
 
@@ -593,142 +266,220 @@ HTML = '''<!DOCTYPE html>
             }
         }
 
-        function updateCartBadge() {
-            const total = Object.values(cart).reduce((a,b) => a + b, 0);
-            const badge = document.getElementById('cartBadge');
-            if (total > 0) {
-                badge.textContent = total;
-                badge.style.display = 'flex';
-            } else {
-                badge.style.display = 'none';
-            }
-        }
-
         function openCart() {
-            renderCartItems();
+            renderCart();
             document.getElementById('cartModal').classList.add('active');
         }
 
-        function closeCart() {
-            document.getElementById('cartModal').classList.remove('active');
-        }
-
-        function renderCartItems() {
+        function renderCart() {
             const container = document.getElementById('cartItems');
             const items = Object.entries(cart);
-            const orderForm = document.getElementById('orderForm');
 
             if (items.length === 0) {
-                container.innerHTML = '<div style="text-align:center; padding:40px; color:#6b6b8a">Корзина пуста</div>';
-                orderForm.style.display = 'none';
+                container.innerHTML = '<div style="text-align:center; padding:40px; color:#888;">Корзина пуста</div>';
                 return;
             }
 
             let total = 0;
             let html = '';
-
             for (let [id, qty] of items) {
-                const p = products.find(p => p.id === parseInt(id));
+                const p = products.find(p => p.id == id);
                 if (p) {
                     total += p.price * qty;
                     html += `
-                        <div class="cart-item">
-                            <div>
-                                <div style="font-weight:bold">${p.emoji} ${p.name}</div>
-                                <div style="font-size:12px; color:#c084fc">${p.price.toLocaleString()}₽ × ${qty}</div>
-                            </div>
-                            <div class="qty-control">
-                                <button class="qty-btn" onclick="removeFromCart(${p.id})">−</button>
-                                <span style="min-width:25px; text-align:center">${qty}</span>
-                                <button class="qty-btn" onclick="addToCart(${p.id})">+</button>
+                        <div class="admin-product" style="justify-content: space-between;">
+                            <div>${p.emoji} ${p.name} x${qty}</div>
+                            <div>${(p.price * qty).toLocaleString()}₽
+                                <button onclick="changeQty(${p.id}, -1)" style="background:#2a2a3a; border:none; color:white; width:28px; border-radius:8px; margin-left:8px;">-</button>
+                                <button onclick="changeQty(${p.id}, 1)" style="background:#2a2a3a; border:none; color:white; width:28px; border-radius:8px;">+</button>
                             </div>
                         </div>
                     `;
                 }
             }
-
-            html += `<div class="cart-total">💰 ИТОГО: ${total.toLocaleString()}₽</div>`;
+            html += `<div style="margin-top:15px; padding-top:15px; border-top:1px solid #333; text-align:right; font-size:18px; font-weight:bold;">💰 ИТОГО: ${total.toLocaleString()}₽</div>`;
             container.innerHTML = html;
-            orderForm.style.display = 'block';
+        }
+
+        function changeQty(id, delta) {
+            cart[id] = Math.max(0, (cart[id] || 0) + delta);
+            if (cart[id] === 0) delete cart[id];
+            saveCart();
+            updateCartBadge();
+            renderCart();
         }
 
         async function submitOrder() {
-            const name = document.getElementById('name').value.trim();
-            const username = document.getElementById('username').value.trim();
-            const comment = document.getElementById('comment').value;
+            const name = document.getElementById('userName').value.trim();
+            const username = document.getElementById('userUsername').value.trim();
+            const comment = document.getElementById('userComment').value;
 
-            if (!name) {
-                showStatus('❌ Введите ваше ФИО', true);
-                return;
-            }
-            if (!username) {
-                showStatus('❌ Введите ваш Telegram username', true);
-                return;
-            }
+            if (!name) { showStatus('❌ Введите ФИО', true); return; }
+            if (!username) { showStatus('❌ Введите Telegram username', true); return; }
 
             const items = Object.entries(cart).map(([id, qty]) => {
-                const p = products.find(p => p.id === parseInt(id));
-                return {
-                    id: p.id,
-                    name: p.name,
-                    emoji: p.emoji,
-                    price: p.price,
-                    qty: qty
-                };
+                const p = products.find(p => p.id == id);
+                return {name: p.name, emoji: p.emoji, price: p.price, qty};
             });
-
             const total = items.reduce((s,i) => s + i.price * i.qty, 0);
 
-            const orderData = {
-                type: 'order',
-                name: name,
-                username: username,
-                comment: comment,
-                total: total,
-                items: items
-            };
-
-            console.log('Отправка заказа:', orderData);
-
-            let success = false;
+            const orderData = {type: 'order', name, username, comment, total, items};
 
             if (tg) {
-                try {
-                    tg.sendData(JSON.stringify(orderData));
-                    success = true;
-                } catch(e) {
-                    console.error('WebApp error:', e);
-                }
-            }
-
-            if (!success) {
-                try {
-                    const res = await fetch('/api/order', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(orderData)
-                    });
-                    if (res.ok) success = true;
-                } catch(e) {
-                    console.error('API error:', e);
-                }
-            }
-
-            if (success) {
-                showStatus('✅ Заказ отправлен! Мы свяжемся с вами');
+                tg.sendData(JSON.stringify(orderData));
+                showStatus('✅ Заказ отправлен!');
                 cart = {};
                 saveCart();
                 updateCartBadge();
-                closeCart();
-                document.getElementById('name').value = '';
-                document.getElementById('username').value = '';
-                document.getElementById('comment').value = '';
+                closeModal('cartModal');
+                document.getElementById('userName').value = '';
+                document.getElementById('userUsername').value = '';
+                document.getElementById('userComment').value = '';
             } else {
-                showStatus('❌ Ошибка отправки заказа. Попробуйте позже', true);
+                showStatus('❌ Откройте магазин через Telegram бота', true);
             }
         }
 
-        loadData();
+        // АДМИН ФУНКЦИИ
+        function openAdmin() {
+            if (!isAdmin) {
+                const pwd = prompt('Введите пароль администратора:');
+                if (pwd === 'admin123') {
+                    isAdmin = true;
+                    showStatus('✅ Добро пожаловать в админ-панель');
+                } else {
+                    showStatus('❌ Неверный пароль', true);
+                    return;
+                }
+            }
+            renderAdminProducts();
+            document.getElementById('adminModal').classList.add('active');
+        }
+
+        function renderAdminProducts() {
+            const html = products.map(p => `
+                <div class="admin-product">
+                    <div>
+                        <div style="font-weight:bold;">${p.emoji} ${p.name}</div>
+                        <div style="font-size:12px; color:#888;">${p.price}₽ | ${p.category}</div>
+                    </div>
+                    <div>
+                        <button onclick="editProduct(${p.id})" style="background:#a855f7; border:none; color:white; width:36px; height:36px; border-radius:10px; margin-right:5px;">✏️</button>
+                        <button onclick="deleteProduct(${p.id})" style="background:#ff4466; border:none; color:white; width:36px; height:36px; border-radius:10px;">🗑️</button>
+                    </div>
+                </div>
+            `).join('');
+            document.getElementById('adminProducts').innerHTML = html || '<div style="text-align:center; padding:20px;">Товаров нет</div>';
+        }
+
+        function showAddProduct() {
+            editingProductId = null;
+            document.getElementById('productModalTitle').textContent = '➕ Добавить товар';
+            document.getElementById('productEmoji').value = '💨';
+            document.getElementById('productName').value = '';
+            document.getElementById('productDesc').value = '';
+            document.getElementById('productCategory').value = 'device';
+            document.getElementById('productPrice').value = '';
+            document.getElementById('productStock').checked = true;
+            document.getElementById('productModal').classList.add('active');
+        }
+
+        function editProduct(id) {
+            const p = products.find(p => p.id === id);
+            if (!p) return;
+            editingProductId = id;
+            document.getElementById('productModalTitle').textContent = '✏️ Редактировать товар';
+            document.getElementById('productEmoji').value = p.emoji;
+            document.getElementById('productName').value = p.name;
+            document.getElementById('productDesc').value = p.desc || '';
+            document.getElementById('productCategory').value = p.category;
+            document.getElementById('productPrice').value = p.price;
+            document.getElementById('productStock').checked = p.stock;
+            document.getElementById('productModal').classList.add('active');
+        }
+
+        async function saveProduct() {
+            const name = document.getElementById('productName').value.trim();
+            const price = parseInt(document.getElementById('productPrice').value);
+            if (!name || !price) {
+                showStatus('❌ Заполните название и цену', true);
+                return;
+            }
+
+            const product = {
+                emoji: document.getElementById('productEmoji').value || '💨',
+                name: name,
+                desc: document.getElementById('productDesc').value,
+                category: document.getElementById('productCategory').value,
+                price: price,
+                stock: document.getElementById('productStock').checked
+            };
+
+            let newProducts = [...products];
+            if (editingProductId) {
+                const index = newProducts.findIndex(p => p.id === editingProductId);
+                newProducts[index] = { ...newProducts[index], ...product };
+            } else {
+                const newId = Math.max(...products.map(p => p.id), 0) + 1;
+                newProducts.push({ id: newId, ...product });
+            }
+
+            try {
+                const res = await fetch('/api/products', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({products: newProducts})
+                });
+                if (res.ok) {
+                    products = newProducts;
+                    renderProducts();
+                    renderAdminProducts();
+                    closeModal('productModal');
+                    showStatus('✅ Товар сохранён!');
+                    if (tg) tg.sendData(JSON.stringify({type: 'sync', products: newProducts}));
+                }
+            } catch(e) {
+                console.error(e);
+                showStatus('❌ Ошибка сохранения', true);
+            }
+        }
+
+        async function deleteProduct(id) {
+            if (!confirm('Удалить товар?')) return;
+            const newProducts = products.filter(p => p.id !== id);
+            try {
+                const res = await fetch('/api/products', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({products: newProducts})
+                });
+                if (res.ok) {
+                    products = newProducts;
+                    renderProducts();
+                    renderAdminProducts();
+                    showStatus('✅ Товар удалён');
+                    if (tg) tg.sendData(JSON.stringify({type: 'sync', products: newProducts}));
+                }
+            } catch(e) {
+                console.error(e);
+            }
+        }
+
+        function closeModal(id) {
+            document.getElementById(id).classList.remove('active');
+        }
+
+        // Показываем кнопку админа по кликам на лого
+        let clickCount = 0;
+        document.querySelector('.logo').onclick = () => {
+            clickCount++;
+            if (clickCount >= 5) {
+                document.getElementById('adminBtn').style.display = 'flex';
+                clickCount = 0;
+            }
+        };
+
+        loadProducts();
     </script>
 </body>
 </html>'''
@@ -737,37 +488,29 @@ HTML = '''<!DOCTYPE html>
 # ========== HTTP СЕРВЕР ==========
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        log.info(f"GET: {self.path}")
-
         if self.path == '/' or self.path == '/index.html':
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.end_headers()
             self.wfile.write(HTML.encode('utf-8'))
-
-        elif self.path == '/api/data':
-            data = load_data()
-            self.send_json({"products": data["products"], "categories": data["categories"]})
-
+        elif self.path == '/api/products':
+            self.send_json(load_products())
         else:
-            self.send_json({"error": "Not found"}, 404)
+            self.send_json({'error': 'Not found'}, 404)
 
     def do_POST(self):
-        content_length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(content_length)
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length)
 
-        log.info(f"POST: {self.path}")
-
-        if self.path == '/api/order':
+        if self.path == '/api/products':
             try:
                 data = json.loads(body)
-                log.info(f"Получен заказ через API: {data.get('name')} - {data.get('total')}₽")
-                self.send_json({"ok": True})
+                save_products(data['products'])
+                self.send_json({'ok': True})
             except Exception as e:
-                log.error(f"Error: {e}")
-                self.send_json({"error": str(e)}, 400)
+                self.send_json({'error': str(e)}, 400)
         else:
-            self.send_json({"error": "Not found"}, 404)
+            self.send_json({'error': 'Not found'}, 404)
 
     def send_json(self, data, code=200):
         self.send_response(code)
@@ -781,111 +524,57 @@ class Handler(BaseHTTPRequestHandler):
 
 
 # ========== TELEGRAM БОТ ==========
-async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    webapp_url = f"https://{ctx.bot.get_me().username}.railway.app"
-    log.info(f"WebApp URL: {webapp_url}")
-
-    kb = [[InlineKeyboardButton("🛒 Открыть GuberVape", web_app=WebAppInfo(url=webapp_url))]]
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    url = f"https://{ctx.bot.get_me().username}.railway.app"
+    kb = [[InlineKeyboardButton("🛒 Открыть GuberVape", web_app=WebAppInfo(url=url))]]
     await update.message.reply_text(
         "🔥 *GUBERVAPE* — премиум вейп шоп\n\n"
-        "Нажмите кнопку ниже, чтобы открыть каталог и сделать заказ.\n\n"
-        "📦 *Доставка по всей России*\n"
-        "💳 *Оплата при получении*\n\n"
-        "⬇️ *НАЖМИТЕ КНОПКУ* ⬇️",
+        "Нажмите кнопку чтобы открыть магазин",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
 
-async def handle_webapp_data(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def handle_data(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    data_raw = update.message.web_app_data.data
+    data = json.loads(update.message.web_app_data.data)
+    log.info(f"Заказ от {user.id}: {data.get('type')}")
 
-    log.info(f"Получены данные от user {user.id}: {data_raw[:200]}")
+    if data.get('type') == 'order':
+        # Отправляем админу
+        items_text = "\n".join(
+            [f"  • {i['emoji']} {i['name']} — {i['qty']} шт × {i['price']}₽ = {i['qty'] * i['price']}₽" for i in
+             data['items']])
+        msg = (
+            f"🚨 *НОВЫЙ ЗАКАЗ!*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 ФИО: {data['name']}\n"
+            f"📱 Telegram: {data['username']}\n\n"
+            f"📦 Товары:\n{items_text}\n\n"
+            f"💰 ИТОГО: {data['total']}₽"
+        )
+        if data.get('comment'):
+            msg += f"\n\n💬 Коммент: {data['comment']}"
 
-    try:
-        data = json.loads(data_raw)
+        await ctx.bot.send_message(chat_id=ADMIN_ID, text=msg, parse_mode="Markdown")
 
-        if data.get('type') == 'order':
-            await process_order(update, ctx, data)
-        else:
-            log.warning(f"Unknown type: {data.get('type')}")
-
-    except Exception as e:
-        log.error(f"Error: {e}")
-
-
-async def process_order(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data: dict):
-    user = update.effective_user
-    db = load_data()
-    db["order_counter"] = db.get("order_counter", 0) + 1
-    order_num = db["order_counter"]
-    save_data(db)
-
-    name = data.get('name', '—')
-    username = data.get('username', '—')
-    comment = data.get('comment', '')
-    items = data.get('items', [])
-    total = data.get('total', 0)
-    now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-
-    items_text = "\n".join([
-        f"  • {i['emoji']} {i['name']} — {i['qty']} шт × {i['price']:,}₽ = {i['qty'] * i['price']:,}₽"
-        for i in items
-    ])
-
-    # Сообщение админу
-    admin_msg = (
-        f"🚨 *НОВЫЙ ЗАКАЗ #{order_num}*\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📅 {now}\n\n"
-        f"👤 *ФИО:* {name}\n"
-        f"📱 *Telegram:* {username}\n"
-        f"🆔 *User ID:* `{user.id}`\n\n"
-        f"📦 *Состав заказа:*\n{items_text}\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 *ИТОГО: {total:,}₽*\n"
-        f"━━━━━━━━━━━━━━━━━━━━"
-    )
-    if comment:
-        admin_msg += f"\n\n💬 *Комментарий:* {comment}"
-
-    # Отправляем админу
-    try:
-        await ctx.bot.send_message(chat_id=ADMIN_ID, text=admin_msg, parse_mode="Markdown")
-        log.info(f"✅ Уведомление отправлено админу {ADMIN_ID}")
-    except Exception as e:
-        log.error(f"Ошибка отправки админу: {e}")
-
-    # Подтверждение пользователю
-    user_msg = (
-        f"✅ *ЗАКАЗ #{order_num} ПРИНЯТ!*\n\n"
-        f"📦 Сумма: *{total:,}₽*\n\n"
-        f"Мы свяжемся с вами в ближайшее время.\n"
-        f"Спасибо за заказ в GuberVape! 🔥"
-    )
-    await update.message.reply_text(user_msg, parse_mode="Markdown")
-    log.info(f"✅ Подтверждение отправлено user {user.id}")
+        # Подтверждение пользователю
+        await update.message.reply_text(f"✅ Заказ принят! Сумма: {data['total']}₽\nСпасибо за заказ!")
 
 
-# ========== ЗАПУСК ==========
 def run_http():
     server = HTTPServer(("0.0.0.0", PORT), Handler)
-    log.info(f"🌐 HTTP сервер на порту {PORT}")
+    log.info(f"HTTP сервер на {PORT}")
     server.serve_forever()
 
 
 def main():
     threading.Thread(target=run_http, daemon=True).start()
-
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_webapp_data))
-
-    log.info(f"🤖 Бот запущен!")
-    log.info(f"👑 Админ ID: {ADMIN_ID}")
-
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_data))
+    log.info("Бот запущен!")
+    app.run_polling()
 
 
 if __name__ == "__main__":
