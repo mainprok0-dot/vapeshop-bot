@@ -1,133 +1,275 @@
-import os
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
-# Фиктивный веб-сервер чтобы Railway не отключал бота
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b'Bot is running!')
-    def log_message(self, format, *args):
-        pass  # отключаем лишние логи
-
-def run_server():
-    port = int(os.environ.get('PORT', 8080))
-    server = HTTPServer(('0.0.0.0', port), Handler)
-    server.serve_forever()
-
-# Запускаем сервер в отдельном потоке
-threading.Thread(target=run_server, daemon=True).start()
 #!/usr/bin/env python3
 """
-VapeShop Telegram Bot — обработчик заказов
-Требования: pip install python-telegram-bot
+GuberVape Bot — полный сервер
+- Хранит товары и категории в JSON файле
+- Отдаёт их через API (все пользователи видят одинаковые товары)
+- Принимает заказы и шлёт красивый чек
+- Работает как веб-сервер на Railway
 """
 
+import os
 import json
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+import threading
+from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
+
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # ============================================================
-# НАСТРОЙКИ — ОБЯЗАТЕЛЬНО ЗАМЕНИТЕ!
+# НАСТРОЙКИ
 # ============================================================
-BOT_TOKEN = "8580758584:AAFLoIN4PVFnQoC_RssMvLaWRhRtQjbep1k"          # Получить у @BotFather
-ADMIN_CHAT_ID = 8237417166              # Ваш Telegram ID (узнать у @userinfobot)
-WEBAPP_URL = "https://musical-lamington-314527.netlify.app"   # URL где хостится index.html
+BOT_TOKEN    = os.environ.get("BOT_TOKEN", "8580758584:AAFLoIN4PVFnQoC_RssMvLaWRhRtQjbep1k")
+ADMIN_ID     = int(os.environ.get("ADMIN_CHAT_ID", "8237417166"))
+WEBAPP_URL   = os.environ.get("WEBAPP_URL", "https://musical-lamington-314527.netlify.app")
+PORT         = int(os.environ.get("PORT", 8080))
+DATA_FILE    = "data.json"
 # ============================================================
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
+logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
+log = logging.getLogger(__name__)
 
+# ============================================================
+# ХРАНИЛИЩЕ ДАННЫХ
+# ============================================================
+DEFAULT_DATA = {
+    "categories": [
+        {"key": "device", "name": "Устройства",  "emoji": "💨"},
+        {"key": "liquid", "name": "Жидкости",    "emoji": "🌊"},
+        {"key": "pod",    "name": "Поды",         "emoji": "🍓"},
+        {"key": "acc",    "name": "Аксессуары",   "emoji": "⚡"},
+    ],
+    "products": [
+        {"id":1,"emoji":"💨","name":"VUSE Alto Pro","desc":"Устройство с регулировкой мощности","category":"device","price":2990,"badge":"hit","inStock":True},
+        {"id":2,"emoji":"🔥","name":"SMOK Nord 5","desc":"Мощный под-мод 80W","category":"device","price":3490,"badge":"new","inStock":True},
+        {"id":3,"emoji":"🌊","name":"BLVK Salt Mango","desc":"Солевая жидкость 30мл 20мг","category":"liquid","price":850,"badge":"","inStock":True},
+        {"id":4,"emoji":"❄️","name":"ICE Salt Mint","desc":"Ледяная мята 30мл 50мг","category":"liquid","price":790,"badge":"sale","inStock":True},
+        {"id":5,"emoji":"🍓","name":"ELFBAR 600 Strawberry","desc":"Одноразовый под 600 затяжек","category":"pod","price":650,"badge":"","inStock":True},
+        {"id":6,"emoji":"🍋","name":"GEEK BAR Lemon","desc":"Одноразовый под 575 затяжек","category":"pod","price":620,"badge":"","inStock":False},
+        {"id":7,"emoji":"🧊","name":"Испаритель Mesh 0.2Ω","desc":"Для SMOK Nord 5, 5шт","category":"acc","price":490,"badge":"","inStock":True},
+        {"id":8,"emoji":"⚡","name":"Зарядка USB-C 65W","desc":"Быстрая зарядка","category":"acc","price":390,"badge":"","inStock":True},
+    ],
+    "order_counter": 0
+}
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /start — открывает магазин"""
-    keyboard = [[
-        InlineKeyboardButton(
-            "🛒 Открыть магазин",
-            web_app=WebAppInfo(url=WEBAPP_URL)
-        )
-    ]]
-    await update.message.reply_text(
-        "🔥 *VAPE SHOP*\n\n"
-        "Добро пожаловать! Нажмите кнопку ниже, чтобы открыть каталог товаров.",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+def load_data():
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return DEFAULT_DATA.copy()
 
+def save_data(data):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
-async def handle_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получение данных из мини-приложения (заказ)"""
-    try:
-        data = json.loads(update.message.web_app_data.data)
+# ============================================================
+# HTTP СЕРВЕР — API для мини-приложения
+# ============================================================
+class APIHandler(BaseHTTPRequestHandler):
 
-        if data.get('type') != 'order':
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self._cors()
+        self.end_headers()
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path == "/":
+            self._json({"status": "GuberVape Bot is running 🔥"})
+        elif path == "/api/data":
+            data = load_data()
+            self._json({"products": data["products"], "categories": data["categories"]})
+        else:
+            self._json({"error": "Not found"}, 404)
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length)
+
+        try:
+            payload = json.loads(body)
+        except Exception:
+            self._json({"error": "Bad JSON"}, 400)
             return
 
-        name = data.get('name', 'Не указано')
-        username = data.get('username', 'Не указан')
-        comment = data.get('comment', '')
-        total = data.get('total', 0)
-        items = data.get('items', [])
+        if path == "/api/products":
+            self._save_products(payload)
+        elif path == "/api/categories":
+            self._save_categories(payload)
+        else:
+            self._json({"error": "Not found"}, 404)
 
-        # Формируем список товаров
-        items_text = '\n'.join([
-            f"  • {item['name']} × {item['qty']} = {item['price'] * item['qty']:,}₽"
-            for item in items
-        ])
+    def _save_products(self, payload):
+        data = load_data()
+        data["products"] = payload.get("products", data["products"])
+        save_data(data)
+        self._json({"ok": True})
 
-        # Сообщение пользователю
-        user_msg = (
-            f"✅ *Заказ принят!*\n\n"
-            f"📦 *Ваш заказ:*\n{items_text}\n\n"
-            f"💰 *Итого:* {total:,}₽\n\n"
-            f"Мы свяжемся с вами в ближайшее время!"
-        )
-        await update.message.reply_text(user_msg, parse_mode="Markdown")
+    def _save_categories(self, payload):
+        data = load_data()
+        data["categories"] = payload.get("categories", data["categories"])
+        save_data(data)
+        self._json({"ok": True})
 
-        # Уведомление администратору
-        admin_msg = (
-            f"🛒 *НОВЫЙ ЗАКАЗ!*\n\n"
-            f"👤 *ФИО:* {name}\n"
-            f"📱 *Telegram:* {username}\n"
-            f"🆔 *User ID:* `{update.message.from_user.id}`\n\n"
-            f"📦 *Товары:*\n{items_text}\n\n"
-            f"💰 *Итого:* {total:,}₽"
-        )
-        if comment:
-            admin_msg += f"\n\n💬 *Комментарий:* {comment}"
+    def _json(self, obj, code=200):
+        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self._cors()
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
-        await context.bot.send_message(
-            chat_id=ADMIN_CHAT_ID,
-            text=admin_msg,
-            parse_mode="Markdown"
-        )
+    def _cors(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
-        logger.info(f"New order from {username} ({update.message.from_user.id}), total: {total}₽")
+    def log_message(self, fmt, *args):
+        pass  # отключаем лишние логи
 
-    except (json.JSONDecodeError, KeyError) as e:
-        logger.error(f"Error processing order: {e}")
-        await update.message.reply_text("❌ Ошибка при оформлении заказа. Попробуйте ещё раз.")
-
-
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ============================================================
+# TELEGRAM BOT
+# ============================================================
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+    kb = [[InlineKeyboardButton("🛒 Открыть магазин", web_app=WebAppInfo(url=WEBAPP_URL))]]
     await update.message.reply_text(
-        "📋 *Команды:*\n"
-        "/start — открыть магазин\n"
-        "/help — помощь",
-        parse_mode="Markdown"
+        "🔥 *GuberVape — Vape Shop*\n\nНажмите кнопку чтобы открыть каталог 👇",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb)
     )
 
+async def handle_webapp_data(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Получаем данные из мини-приложения"""
+    try:
+        raw = update.message.web_app_data.data
+        data = json.loads(raw)
+        dtype = data.get("type")
+
+        if dtype == "order":
+            await process_order(update, ctx, data)
+        elif dtype == "save_products":
+            await process_save_products(update, ctx, data)
+        elif dtype == "save_categories":
+            await process_save_categories(update, ctx, data)
+
+    except Exception as e:
+        log.error(f"WebApp data error: {e}")
+        await update.message.reply_text("❌ Ошибка обработки. Попробуйте снова.")
+
+async def process_order(update, ctx, data):
+    """Обработка заказа — красивый чек"""
+    db = load_data()
+    db["order_counter"] = db.get("order_counter", 0) + 1
+    order_num = db["order_counter"]
+    save_data(db)
+
+    name     = data.get("name", "—")
+    username = data.get("username", "—")
+    comment  = data.get("comment", "")
+    items    = data.get("items", [])
+    total    = data.get("total", 0)
+    now      = datetime.now().strftime("%d.%m.%Y %H:%M")
+    user_id  = update.message.from_user.id
+
+    # Строки товаров
+    items_lines = "\n".join([
+        f"  {i['emoji']} {i['name']}\n  └ {i['qty']} шт × {i['price']:,}₽ = {i['qty']*i['price']:,}₽"
+        for i in items
+    ])
+
+    # ЧЕК для покупателя
+    receipt = (
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🧾 *ЧЕК ЗАКАЗА #{order_num}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📅 {now}\n\n"
+        f"📦 *Состав заказа:*\n{items_lines}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 *ИТОГО: {total:,}₽*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👤 {name}\n"
+        f"📱 {username}\n"
+    )
+    if comment:
+        receipt += f"💬 {comment}\n"
+    receipt += "\nСпасибо за заказ! Мы свяжемся с вами скоро 🔥"
+
+    # Отправляем чек покупателю
+    await update.message.reply_text(receipt, parse_mode="Markdown")
+
+    # Уведомление администратору
+    admin_msg = (
+        f"🚨 *НОВЫЙ ЗАКАЗ #{order_num}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📅 {now}\n\n"
+        f"👤 *ФИО:* {name}\n"
+        f"📱 *Telegram:* {username}\n"
+        f"🆔 *User ID:* `{user_id}`\n\n"
+        f"📦 *Товары:*\n{items_lines}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 *ИТОГО: {total:,}₽*\n"
+        f"━━━━━━━━━━━━━━━━━━━━"
+    )
+    if comment:
+        admin_msg += f"\n\n💬 *Комментарий:* {comment}"
+
+    if ADMIN_ID:
+        try:
+            await ctx.bot.send_message(chat_id=ADMIN_ID, text=admin_msg, parse_mode="Markdown")
+        except Exception as e:
+            log.error(f"Failed to send admin notification: {e}")
+
+    log.info(f"Order #{order_num} from {username} ({user_id}), total: {total}₽")
+
+async def process_save_products(update, ctx, data):
+    """Сохранение товаров от админа"""
+    user_id = update.message.from_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет доступа")
+        return
+    db = load_data()
+    db["products"] = data.get("products", [])
+    save_data(db)
+    await update.message.reply_text("✅ Товары сохранены!")
+    log.info(f"Products updated by admin {user_id}")
+
+async def process_save_categories(update, ctx, data):
+    """Сохранение категорий от админа"""
+    user_id = update.message.from_user.id
+    if user_id != ADMIN_ID:
+        return
+    db = load_data()
+    db["categories"] = data.get("categories", [])
+    save_data(db)
+    await update.message.reply_text("✅ Категории сохранены!")
+
+# ============================================================
+# ЗАПУСК
+# ============================================================
+def run_http():
+    server = HTTPServer(("0.0.0.0", PORT), APIHandler)
+    log.info(f"HTTP API started on port {PORT}")
+    server.serve_forever()
 
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_web_app_data))
-    logger.info("Bot started...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Запускаем HTTP сервер в отдельном потоке
+    threading.Thread(target=run_http, daemon=True).start()
 
+    # Запускаем Telegram бота
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_webapp_data))
+
+    log.info("GuberVape Bot started!")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
