@@ -1,175 +1,275 @@
-import asyncio
+#!/usr/bin/env python3
+"""
+GuberVape Bot — полный сервер
+- Хранит товары и категории в JSON файле
+- Отдаёт их через API (все пользователи видят одинаковые товары)
+- Принимает заказы и шлёт красивый чек
+- Работает как веб-сервер на Railway
+"""
+
+import os
+import json
 import logging
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
+import threading
+from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 
-from config import 8580758584:AAFLoIN4PVFnQoC_RssMvLaWRhRtQjbep1k, 8237417166
-from database import *
-from keyboards import main_menu, admin_panel
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-logging.basicConfig(level=logging.INFO)
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+# ============================================================
+# НАСТРОЙКИ
+# ============================================================
+BOT_TOKEN    = os.environ.get("BOT_TOKEN", "8580758584:AAFLoIN4PVFnQoC_RssMvLaWRhRtQjbep1k")
+ADMIN_ID     = int(os.environ.get("ADMIN_CHAT_ID", "8237417166"))
+WEBAPP_URL   = os.environ.get("WEBAPP_URL", "https://musical-lamington-314527.netlify.app")
+PORT         = int(os.environ.get("PORT", 8080))
+DATA_FILE    = "data.json"
+# ============================================================
 
-# ---- FSM для админки ----
-class AdminStates(StatesGroup):
-    waiting_cat_name = State()
-    waiting_product_name = State()
-    waiting_product_price = State()
-    waiting_product_cat = State()
-    waiting_del_cat = State()
-    waiting_del_product = State()
-    waiting_edit_product_id = State()
-    waiting_edit_product_name = State()
-    waiting_edit_product_price = State()
+logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
+log = logging.getLogger(__name__)
 
-class OrderStates(StatesGroup):
-    waiting_fio = State()
-    waiting_comment = State()
+# ============================================================
+# ХРАНИЛИЩЕ ДАННЫХ
+# ============================================================
+DEFAULT_DATA = {
+    "categories": [
+        {"key": "device", "name": "Устройства",  "emoji": "💨"},
+        {"key": "liquid", "name": "Жидкости",    "emoji": "🌊"},
+        {"key": "pod",    "name": "Поды",         "emoji": "🍓"},
+        {"key": "acc",    "name": "Аксессуары",   "emoji": "⚡"},
+    ],
+    "products": [
+        {"id":1,"emoji":"💨","name":"VUSE Alto Pro","desc":"Устройство с регулировкой мощности","category":"device","price":2990,"badge":"hit","inStock":True},
+        {"id":2,"emoji":"🔥","name":"SMOK Nord 5","desc":"Мощный под-мод 80W","category":"device","price":3490,"badge":"new","inStock":True},
+        {"id":3,"emoji":"🌊","name":"BLVK Salt Mango","desc":"Солевая жидкость 30мл 20мг","category":"liquid","price":850,"badge":"","inStock":True},
+        {"id":4,"emoji":"❄️","name":"ICE Salt Mint","desc":"Ледяная мята 30мл 50мг","category":"liquid","price":790,"badge":"sale","inStock":True},
+        {"id":5,"emoji":"🍓","name":"ELFBAR 600 Strawberry","desc":"Одноразовый под 600 затяжек","category":"pod","price":650,"badge":"","inStock":True},
+        {"id":6,"emoji":"🍋","name":"GEEK BAR Lemon","desc":"Одноразовый под 575 затяжек","category":"pod","price":620,"badge":"","inStock":False},
+        {"id":7,"emoji":"🧊","name":"Испаритель Mesh 0.2Ω","desc":"Для SMOK Nord 5, 5шт","category":"acc","price":490,"badge":"","inStock":True},
+        {"id":8,"emoji":"⚡","name":"Зарядка USB-C 65W","desc":"Быстрая зарядка","category":"acc","price":390,"badge":"","inStock":True},
+    ],
+    "order_counter": 0
+}
 
-# ---- Главное меню ----
-@dp.message(Command("start"))
-async def start(msg: types.Message):
-    await msg.answer(
-        "🔥 *GUBER JUICE VAPE SHOP* 🔥\n\nТвоя выгодная сделка!\nВыбери категорию и добавляй в корзину 💨",
-        reply_markup=main_menu(),
-        parse_mode="Markdown"
+def load_data():
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return DEFAULT_DATA.copy()
+
+def save_data(data):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+# ============================================================
+# HTTP СЕРВЕР — API для мини-приложения
+# ============================================================
+class APIHandler(BaseHTTPRequestHandler):
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self._cors()
+        self.end_headers()
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path == "/":
+            self._json({"status": "GuberVape Bot is running 🔥"})
+        elif path == "/api/data":
+            data = load_data()
+            self._json({"products": data["products"], "categories": data["categories"]})
+        else:
+            self._json({"error": "Not found"}, 404)
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length)
+
+        try:
+            payload = json.loads(body)
+        except Exception:
+            self._json({"error": "Bad JSON"}, 400)
+            return
+
+        if path == "/api/products":
+            self._save_products(payload)
+        elif path == "/api/categories":
+            self._save_categories(payload)
+        else:
+            self._json({"error": "Not found"}, 404)
+
+    def _save_products(self, payload):
+        data = load_data()
+        data["products"] = payload.get("products", data["products"])
+        save_data(data)
+        self._json({"ok": True})
+
+    def _save_categories(self, payload):
+        data = load_data()
+        data["categories"] = payload.get("categories", data["categories"])
+        save_data(data)
+        self._json({"ok": True})
+
+    def _json(self, obj, code=200):
+        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self._cors()
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _cors(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+    def log_message(self, fmt, *args):
+        pass  # отключаем лишние логи
+
+# ============================================================
+# TELEGRAM BOT
+# ============================================================
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+    kb = [[InlineKeyboardButton("🛒 Открыть магазин", web_app=WebAppInfo(url=WEBAPP_URL))]]
+    await update.message.reply_text(
+        "🔥 *GuberVape — Vape Shop*\n\nНажмите кнопку чтобы открыть каталог 👇",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb)
     )
 
-# ---- Товары (категории) ----
-@dp.message(F.text == "🛍 Товары")
-async def show_categories(msg: types.Message):
-    cats = get_categories()
-    if not cats:
-        await msg.answer("⚠️ Категорий пока нет.")
-        return
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=name, callback_data=f"cat_{cid}")] for cid, name in cats
-    ] + [[InlineKeyboardButton(text="🔙 Назад", callback_data="back_main")]])
-    await msg.answer("📂 *Выбери категорию:*", reply_markup=kb, parse_mode="Markdown")
+async def handle_webapp_data(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Получаем данные из мини-приложения"""
+    try:
+        raw = update.message.web_app_data.data
+        data = json.loads(raw)
+        dtype = data.get("type")
 
-@dp.callback_query(F.data.startswith("cat_"))
-async def show_products(call: types.CallbackQuery):
-    cat_id = int(call.data.split("_")[1])
-    products = get_products_by_category(cat_id)
-    if not products:
-        await call.message.edit_text("📭 Товаров в категории пока нет.")
-        return
-    text = "🧾 *Товары:*\n\n"
-    for pid, name, price in products:
-        text += f"• {name} — {price}₽\n"
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"➕ {name}", callback_data=f"add_{pid}")] for pid, name, price in products
-    ] + [[InlineKeyboardButton(text="🔙 Назад", callback_data="back_cats")]])
-    await call.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+        if dtype == "order":
+            await process_order(update, ctx, data)
+        elif dtype == "save_products":
+            await process_save_products(update, ctx, data)
+        elif dtype == "save_categories":
+            await process_save_categories(update, ctx, data)
 
-@dp.callback_query(F.data.startswith("add_"))
-async def add_to_cart_handler(call: types.CallbackQuery):
-    product_id = int(call.data.split("_")[1])
-    user_id = call.from_user.id
-    add_to_cart(user_id, product_id)
-    await call.answer("✅ Добавлено в корзину!", show_alert=True)
+    except Exception as e:
+        log.error(f"WebApp data error: {e}")
+        await update.message.reply_text("❌ Ошибка обработки. Попробуйте снова.")
 
-# ---- Корзина ----
-@dp.message(F.text == "🛒 Корзина")
-async def show_cart(msg: types.Message):
-    cart = get_cart(msg.from_user.id)
-    if not cart:
-        await msg.answer("🛒 Корзина пуста")
-        return
-    text = "🛍 *Твоя корзина:*\n\n"
-    total = 0
-    for pid, name, price, qty in cart:
-        text += f"{name} x{qty} = {price*qty}₽\n"
-        total += price*qty
-    text += f"\n💰 *Итого: {total}₽*"
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Очистить корзину", callback_data="clear_cart")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_main")]
+async def process_order(update, ctx, data):
+    """Обработка заказа — красивый чек"""
+    db = load_data()
+    db["order_counter"] = db.get("order_counter", 0) + 1
+    order_num = db["order_counter"]
+    save_data(db)
+
+    name     = data.get("name", "—")
+    username = data.get("username", "—")
+    comment  = data.get("comment", "")
+    items    = data.get("items", [])
+    total    = data.get("total", 0)
+    now      = datetime.now().strftime("%d.%m.%Y %H:%M")
+    user_id  = update.message.from_user.id
+
+    # Строки товаров
+    items_lines = "\n".join([
+        f"  {i['emoji']} {i['name']}\n  └ {i['qty']} шт × {i['price']:,}₽ = {i['qty']*i['price']:,}₽"
+        for i in items
     ])
-    await msg.answer(text, reply_markup=kb, parse_mode="Markdown")
 
-@dp.callback_query(F.data == "clear_cart")
-async def clear_cart_handler(call: types.CallbackQuery):
-    clear_cart(call.from_user.id)
-    await call.message.edit_text("🗑 Корзина очищена")
-    await call.answer()
-
-# ---- Оформление заказа ----
-@dp.message(F.text == "📦 Оформить заказ")
-async def order_fio(msg: types.Message, state: FSMContext):
-    cart = get_cart(msg.from_user.id)
-    if not cart:
-        await msg.answer("⚠️ Корзина пуста")
-        return
-    await state.update_data(cart=cart)
-    await msg.answer("📝 *Введи своё ФИО:*", parse_mode="Markdown")
-    await state.set_state(OrderStates.waiting_fio)
-
-@dp.message(OrderStates.waiting_fio)
-async def order_comment(msg: types.Message, state: FSMContext):
-    await state.update_data(fio=msg.text)
-    await msg.answer("📝 *Комментарий к заказу (можно пропустить):*\nВведи '-' если без комментария", parse_mode="Markdown")
-    await state.set_state(OrderStates.waiting_comment)
-
-@dp.message(OrderStates.waiting_comment)
-async def order_finish(msg: types.Message, state: FSMContext):
-    data = await state.get_data()
-    cart = data["cart"]
-    fio = data["fio"]
-    comment = "" if msg.text == "-" else msg.text
-
-    items_text = "\n".join([f"{name} x{qty} = {price*qty}₽" for pid, name, price, qty in cart])
-    total = sum([price*qty for pid, name, price, qty in cart])
-
-    save_order(
-        user_id=msg.from_user.id,
-        fio=fio,
-        tg_username=msg.from_user.username,
-        comment=comment,
-        cart_items=[{"name": n, "qty": q, "price": p} for pid, n, p, q in cart]
+    # ЧЕК для покупателя
+    receipt = (
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🧾 *ЧЕК ЗАКАЗА #{order_num}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📅 {now}\n\n"
+        f"📦 *Состав заказа:*\n{items_lines}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 *ИТОГО: {total:,}₽*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👤 {name}\n"
+        f"📱 {username}\n"
     )
-    clear_cart(msg.from_user.id)
+    if comment:
+        receipt += f"💬 {comment}\n"
+    receipt += "\nСпасибо за заказ! Мы свяжемся с вами скоро 🔥"
 
-    # Отправка админу
-    admin_text = f"🆕 *НОВЫЙ ЗАКАЗ!*\n\n👤 ФИО: {fio}\n🆔 TG: @{msg.from_user.username}\n💬 Коммент: {comment}\n\n🧾 Состав:\n{items_text}\n\n💰 Итого: {total}₽"
-    await bot.send_message(ADMIN_ID, admin_text, parse_mode="Markdown")
+    # Отправляем чек покупателю
+    await update.message.reply_text(receipt, parse_mode="Markdown")
 
-    await msg.answer("✅ *Заказ оформлен!* Скоро с тобой свяжется оператор.", parse_mode="Markdown")
-    await state.clear()
+    # Уведомление администратору
+    admin_msg = (
+        f"🚨 *НОВЫЙ ЗАКАЗ #{order_num}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📅 {now}\n\n"
+        f"👤 *ФИО:* {name}\n"
+        f"📱 *Telegram:* {username}\n"
+        f"🆔 *User ID:* `{user_id}`\n\n"
+        f"📦 *Товары:*\n{items_lines}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 *ИТОГО: {total:,}₽*\n"
+        f"━━━━━━━━━━━━━━━━━━━━"
+    )
+    if comment:
+        admin_msg += f"\n\n💬 *Комментарий:* {comment}"
 
-# ---- Админ панель (доступ только админу) ----
-@dp.message(F.text == "👤 Админ панель")
-async def admin_check(msg: types.Message):
-    if msg.from_user.id != ADMIN_ID:
-        await msg.answer("🚫 Доступ запрещён")
+    if ADMIN_ID:
+        try:
+            await ctx.bot.send_message(chat_id=ADMIN_ID, text=admin_msg, parse_mode="Markdown")
+        except Exception as e:
+            log.error(f"Failed to send admin notification: {e}")
+
+    log.info(f"Order #{order_num} from {username} ({user_id}), total: {total}₽")
+
+async def process_save_products(update, ctx, data):
+    """Сохранение товаров от админа"""
+    user_id = update.message.from_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет доступа")
         return
-    await msg.answer("⚙️ *Админ панель*", reply_markup=admin_panel(), parse_mode="Markdown")
+    db = load_data()
+    db["products"] = data.get("products", [])
+    save_data(db)
+    await update.message.reply_text("✅ Товары сохранены!")
+    log.info(f"Products updated by admin {user_id}")
 
-# ---- Обработка админ-кнопок (сокращённо) ----
-@dp.callback_query(F.data == "admin_orders")
-async def admin_orders(call: types.CallbackQuery):
-    orders = get_orders()
-    if not orders:
-        await call.message.edit_text("📭 Заказов нет")
+async def process_save_categories(update, ctx, data):
+    """Сохранение категорий от админа"""
+    user_id = update.message.from_user.id
+    if user_id != ADMIN_ID:
         return
-    for oid, uid, fio, tg, cmt, items, status in orders:
-        await call.message.answer(
-            f"📦 Заказ #{oid}\nСтатус: {status}\nФИО: {fio}\nTG: @{tg}\nСостав: {items}\nКоммент: {cmt}"
-        )
+    db = load_data()
+    db["categories"] = data.get("categories", [])
+    save_data(db)
+    await update.message.reply_text("✅ Категории сохранены!")
 
-# ---- Добавь здесь все остальные admin_edit, admin_delete, admin_add_cat и т.д. по аналогии ----
+# ============================================================
+# ЗАПУСК
+# ============================================================
+def run_http():
+    server = HTTPServer(("0.0.0.0", PORT), APIHandler)
+    log.info(f"HTTP API started on port {PORT}")
+    server.serve_forever()
 
-# ---- Назад ----
-@dp.callback_query(F.data == "back_main")
-async def back_main(call: types.CallbackQuery):
-    await call.message.delete()
-    await start(call.message)
+def main():
+    # Запускаем HTTP сервер в отдельном потоке
+    threading.Thread(target=run_http, daemon=True).start()
 
-async def main():
-    await dp.start_polling(bot)
+    # Запускаем Telegram бота
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_webapp_data))
+
+    log.info("GuberVape Bot started!")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
