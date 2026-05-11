@@ -11,7 +11,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 # ========== НАСТРОЙКИ ==========
 BOT_TOKEN = "8580758584:AAFLoIN4PVFnQoC_RssMvLaWRhRtQjbep1k"
-ADMIN_ID = 8237417166  # ВАШ Telegram ID (число!)
+ADMIN_ID = -1003718115393  # ВАШ Telegram ID (число!)
+CHANNEL_ID = -1003718115393
 PORT = int(os.environ.get("PORT", 8080))
 DATA_FILE = "products.json"
 # ================================
