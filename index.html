@@ -1,0 +1,60 @@
+<script>
+// ========== СИНХРОНИЗАЦИЯ С СЕРВЕРОМ ==========
+const API_URL = window.__API_URL__ || 'https://' + window.location.host;
+
+// Загрузка товаров с сервера
+async function loadProductsFromServer() {
+    try {
+        const response = await fetch(API_URL + '/api/data');
+        const data = await response.json();
+        if (data.products && data.products.length) {
+            products = data.products;
+            saveProducts();
+            renderProducts();
+            if (typeof renderAdmin === 'function') renderAdmin();
+            console.log('✅ Товары загружены с сервера');
+        }
+    } catch(e) {
+        console.log('⚠️ Офлайн режим, используем локальные товары');
+    }
+}
+
+// Отправка изменений на сервер
+async function syncToServer() {
+    if (window.Telegram?.WebApp) {
+        Telegram.WebApp.sendData(JSON.stringify({
+            type: 'sync',
+            products: products
+        }));
+        return true;
+    }
+    
+    try {
+        await fetch(API_URL + '/api/sync', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ products: products })
+        });
+        return true;
+    } catch(e) {
+        return false;
+    }
+}
+
+// Сохраняем оригинальную функцию
+const originalSaveProductGlobal = window.saveProduct;
+
+// Переопределяем saveProduct
+window.saveProduct = function() {
+    if (originalSaveProductGlobal) originalSaveProductGlobal();
+    syncToServer();
+    if (window.Telegram?.WebApp) {
+        Telegram.WebApp.HapticFeedback.notificationOccurred('success');
+    }
+}
+
+// Загружаем товары при старте
+setTimeout(() => {
+    loadProductsFromServer();
+}, 500);
+</script>
